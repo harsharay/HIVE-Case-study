@@ -1,0 +1,521 @@
+ADD JAR /opt/cloudera/parcels/CDH/lib/hive/lib/hive-hcatalog-core-1.1.0-cdh5.11.2.jar;  
+SET hive.exec.max.dynamic.partitions=100000; 
+SET hive.exec.max.dynamic.partitions.pernode=100000;
+
+--Creating external table
+create external table if not exists taxi(
+VendorID int,
+tpep_pickup_datetime timestamp,
+tpep_dropoff_datetime timestamp,
+Passenger_count int,
+Trip_distance double,
+RateCodeID int,
+Store_and_fwd_flag string,
+PULocationID int,
+DOLocationID int,
+Payment_type int,
+Fare_amount double,
+Extra double,
+MTA_tax double,
+Tip_amount double,
+Tolls_amount double,
+Improvement_surcharge double,
+Total_amount double)
+row format delimited fields terminated by ','
+location '/common_folder/nyc_taxi_data/'
+tblproperties ("skip.header.line.count"="1");
+
+--Checking whether data correctly loaded or not
+select count(*)
+from taxi;
+
+select *
+from taxi
+LIMIT 10;
+
+--Basic Data Quality Checks
+--1 How many records has each TPEP provider provided? Write a query that summarises the number of records of each provider.
+select vendorid, count(*)
+from taxi
+group by vendorid;
+--There are two vendors
+--1.Creative Mobile Technologies supplied a total of 527386 trips, LLC; 2= VeriFone Inc. supplied a total of 647183 trips
+
+/*2 The data provided is for months November and December only. Check whether the data is consistent, and if not, identify the data quality issues. 
+Mention all data quality issues in comments.*/
+select month(tpep_pickup_datetime) as mth,year(tpep_pickup_datetime) as yr, count(*) as total_trips_in_that_month
+from taxi
+group by month(tpep_pickup_datetime), year(tpep_pickup_datetime)
+order by total_trips_in_that_month desc;
+--Below are the details
+--  mth  yr     total_trips_in_that_month
+1	12	2017	594255
+2	11	2017	580300
+3	10	2017	6
+4	1	2018	4
+5	12	2008	2
+6	1	2009	1
+7	1	2003	1 
+--There are few trips taken in months other than Nov and Dec.
+
+/*3 You might have encountered unusual or erroneous rows in the dataset. 
+Can you conclude which vendor is doing a bad job in providing the records using different columns of the dataset? 
+Summarise your conclusions based on every column where these errors are present. 
+For example,  There are unusual passenger count, i.e. 0 which is unusual.
+
+a. Checking if timestamp of pickup time is greater than drop time*/
+select VendorID,count(*)
+from taxi
+where timestamp(tpep_pickup_datetime) > timestamp(tpep_dropoff_datetime)
+group by VendorID;
+-- There are 73 records for which the pickup time is greate than drop off time, which is invalid. All these records are of Creative Mobile Technologies
+
+-- b.Checking if the total amount is less than fare amount
+select VendorID,count(*)
+from taxi
+where Total_amount < Fare_amount
+group by VendorID;
+--There are 558 records which has total amount less than fare amount and all these records being shown by VeriFone Inc
+
+--c. Checking passenger count
+select Passenger_count, count(*)
+from taxi
+group by Passenger_count;
+-- Most trips happened with solo passenger which are 827499
+
+-- Group by Vendor ID
+select VendorID, count(*)
+from taxi
+group by VendorID, Passenger_count;
+
+--d. Checking rate codes
+select RateCodeID, count(*) as cnt
+from taxi
+group by RateCodeID
+order by cnt;
+--There are 9 records which has ratecodeid as 99, which is invalid
+
+-- Checking which vendor has wrong ratecodeid
+select VendorID, count(*)
+from taxi
+where RateCodeID=99
+group by VendorID;
+--Out of the total 9 wrong records, 8 are of  Creative Mobile Technologies and 1 is from Verifone Inc.
+
+-- e. Checking trip distance errors
+select min(Trip_distance)
+from taxi;
+-- Min value is 0
+
+-- Finding trips with 0 distance
+select count(*)
+from taxi
+where Trip_distance=0;
+-- There are a total of 7402 trips done with distance as 0, which might be inaccurate
+
+--Checking which vendor made trips with 0 distance
+select VendorID, count(*)
+from taxi
+where Trip_distance=0
+group by VendorID;
+--Creative Mobile Technologies recorded 4217 trips with 0 distance while Verifone Inc. recorded 3185 trips
+
+--f. Checking min of total amount which ideally should be a positive number or 0
+select min(Total_amount)
+from taxi;
+-- So the min of total amount is -200.8,which is not valid
+
+-- Finding records which has negative total amount
+select count(*)
+from taxi
+where Total_amount<0;
+-- 558 trips have negative total amount
+
+-- The below records show the total amount when the distance travelled is 0. Ideally the amount should alsoe be zero but its not
+select Total_amount
+from taxi
+where Trip_distance=0;
+
+
+-- Creating a partitioned table with month and days as partitions
+create external table if not exists taxi_partitioned
+(VendorID int,
+tpep_pickup_datetime timestamp,
+tpep_dropoff_datetime timestamp,
+Passenger_count int,
+Trip_distance double,
+RateCodeID int,
+Store_and_fwd_flag string,
+PULocationID int,
+DOLocationID int,
+Payment_type int,
+Fare_amount double,
+Extra double,
+MTA_tax double,
+Tip_amount double,
+Tolls_amount double,
+Improvement_surcharge double,
+Total_amount double)
+partitioned by (mnth int,day int)
+location '/user/hive/warehouse/harsha_db';
+
+insert overwrite table taxi_partitioned partition(mnth,day)
+select VendorID,
+tpep_pickup_datetime,
+tpep_dropoff_datetime,
+Passenger_count,
+Trip_distance,
+RateCodeID,
+Store_and_fwd_flag,
+PULocationID,
+DOLocationID,
+Payment_type,
+Fare_amount,
+Extra,
+MTA_tax,
+Tip_amount,
+Tolls_amount,
+Improvement_surcharge,
+Total_amount,
+month(tpep_pickup_datetime) as mnth,
+day(tpep_pickup_datetime) as day
+from taxi;
+
+-- Checking whether data is correctly populated into partitioned table
+select *
+from taxi_partitioned
+LIMIT 10;
+
+-- Storing it in ORC format
+create external table if not exists taxi_partitioned_orc
+(VendorID int,
+tpep_pickup_datetime timestamp,
+tpep_dropoff_datetime timestamp,
+Passenger_count int,
+Trip_distance double,
+RateCodeID int,
+Store_and_fwd_flag string,
+PULocationID int,
+DOLocationID int,
+Payment_type int,
+Fare_amount double,
+Extra double,
+MTA_tax double,
+Tip_amount double,
+Tolls_amount double,
+Improvement_surcharge double,
+Total_amount double)
+partitioned by (mnth int,day int)
+stored as orc
+location '/user/hive/warehouse/harsha_db'
+tblproperties ("orc.compress"="SNAPPY");
+
+insert overwrite table taxi_partitioned_orc partition(mnth,day)
+select * from taxi_partitioned 
+where mnth in (11,12) and tpep_pickup_datetime < tpep_dropoff_datetime and Passenger_count!=0 and Trip_distance>0 and RateCodeID in (1,2,3,4,5,6) 
+and Payment_type in (1,2,3,4,5,6) and Fare_amount>0 and Total_amount>0;
+
+--Checking whether data is loaded properly or not
+select *
+from taxi_partitioned_orc
+LIMIT 10;
+
+--EDA
+
+--Count of valid records provided by each Vendor
+select VendorID, count(*)
+from taxi_partitioned_orc
+group by VendorID;
+1	515406
+2	642548
+
+-- Average travel time for all the cabs by both vendors
+select round(avg((unix_timestamp(tpep_dropoff_datetime)-unix_timestamp(tpep_pickup_datetime))/60),2)
+from taxi_partitioned_orc;
+18.29 mins
+
+--Average travel time grouped by the Vendors
+select VendorID,round(avg((unix_timestamp(tpep_dropoff_datetime)-unix_timestamp(tpep_pickup_datetime))/60),2)
+from taxi_partitioned_orc
+group by VendorID;
+/*
+Creative Mobile Technologies	16.13
+VeriFone Inc.              	    20.03 */
+
+--Average passenger count by different vendors
+select VendorID, round(avg(Passenger_count),2) as Average_Passenger_count
+from taxi_partitioned_orc
+group by VendorID;
+vendorid	average_passenger_count
+1	        1.29
+2	        1.91
+
+--Calculating passenger counts for different no. of passengers for Vendor "Creative Mobile Technologies" 
+select Passenger_count, count(*)
+from taxi_partitioned_orc
+where VendorID=1
+group by Passenger_count;
+-- Most travelled trips are with 1 passenger and least are with 7 , 6 passengers
+
+select round(avg(cnt),2)
+from(
+select Passenger_count,count(*) as cnt
+from taxi_partitioned_orc
+where VendorID=1
+group by Passenger_count
+) as Avg_count
+-- The average count is 73629.42 which is almost near to the count of having 2 passengers. This states that the trips on an average will have 2 passengers
+
+--Calculating passenger counts for different no. of passengers for Vendor "VeriFone Inc." 
+select Passenger_count, count(*)
+from taxi_partitioned_orc
+where VendorID=2
+group by Passenger_count;
+--  Most travelled trips are with 1 passenger and least are with 7 , 6 passengers
+
+select round(avg(cnt))
+from(
+select Passenger_count, count(*) as cnt
+from taxi_partitioned_orc
+where VendorID=2
+group by Passenger_count
+) as Avg_count
+-- The average count is 91793 which is almost near to the count of having 2 passengers. This states that the trips on an average will have 2 passengers
+
+--Count of rate code id
+select RateCodeID, count(*)
+from taxi_partitioned_orc
+group by RateCodeID;
+-- Most used rate code id was 1 which is StandardRate and least was group rate
+
+-- For Vendor 1
+select RateCodeID, count(*)
+from taxi_partitioned_orc
+where VendorID=1
+group by RateCodeID;
+
+--For Vendor 2
+select RateCodeID, count(*)
+from taxi_partitioned_orc
+where VendorID=2
+group by RateCodeID;
+
+-- Calcualting the count of payment types
+select Payment_type, count(*)
+from taxi_partitioned_orc
+group by Payment_type;
+1	    782124
+2       369996
+3	    4525
+4	    1309
+
+--Fare amount
+
+select round(avg(Fare_amount),2) as Avg_amnt,round(max(Fare_amount),2) as Max_amnt,round(min(fare_amount),2) as Min_amnt
+from taxi_partitioned_orc;
+-- The average fare amount charged is 12.94 and max amount is 419 and min amount is 0.01
+
+-- For vendor 1
+select round(avg(Fare_amount),2) as Avg_amnt,round(max(Fare_amount),2) as Max_amnt,round(min(fare_amount),2) as Min_amnt
+from taxi_partitioned_orc
+where VendorID=1;
+-- The average fare amount charged by vendor 1 is 12.76 and max amount is 400 and min amount is 0.01
+
+-- For vendor 2
+select round(avg(Fare_amount),2) as Avg_amnt,round(max(Fare_amount),2) as Max_amnt,round(min(fare_amount),2) as Min_amnt
+from taxi_partitioned_orc
+where VendorID=2;
+-- The average fare amount charged by vendor 2 is 13.1 and max amount is 419 and min amount is 0.01
+
+--Total Amount
+
+select round(avg(Total_amount),2) as Avg_amnt,round(max(Total_amount),2) as Max_amnt,round(min(Total_amount),2) as Min_amnt
+from taxi_partitioned_orc;
+-- The average fare amount charged is 16.24 and max amount is 928.19 and min amount is 0.31
+
+-- For vendor 1
+select round(avg(Total_amount),2) as Avg_amnt,round(max(Total_amount),2) as Max_amnt,round(min(Total_amount),2) as Min_amnt
+from taxi_partitioned_orc
+where VendorID=1;
+-- The average fare amount charged by vendor 1 is 15.99 and max amount is 928.19 and min amount is 0.31
+
+-- For vendor 2
+select round(avg(Total_amount),2) as Avg_amnt,round(max(Total_amount),2) as Max_amnt,round(min(Total_amount),2) as Min_amnt
+from taxi_partitioned_orc
+where VendorID=2;
+-- The average fare amount charged by vendor 2 is 16.44 and max amount is 419.8 and min amount is 0.31
+
+
+-- Analysis-1
+--1. Compare the overall average fare per trip for November and December.
+select mnth,round(avg(Fare_amount),2) as Avg_fare
+from taxi_partitioned_orc
+group by mnth;
+ 	mnth    Avg_fare
+1	11	    13.05
+2	12	    12.84
+
+
+--2.Explore the ‘number of passengers per trip’ - how many trips are made by each level of ‘Passenger_count’? Do most people travel solo or with other people?
+select Passenger_count, count(*) as cnt
+from taxi_partitioned_orc
+group by Passenger_count
+order by cnt;
+passenger_count	cnt
+1	            819841
+2	            175649
+3	            50406
+4	            24788
+5	            54268
+6	            32999
+7	            3
+-- Most trips happened with only solo passenger in the cab
+--After that most trips happened with 2 passengers which is 175649 trips.  
+-- The conclusion is more number of people prefer to travel solo compared to group rides
+
+--3.Which is the most preferred mode of payment?
+select Payment_type, count(*) as cnt
+from taxi_partitioned_orc
+group by Payment_type
+order by cnt;
+payment_type	cnt
+4	            1309
+3	            4525
+2	            369996
+1	            782124
+-- Most prefered payment method is Credit card. After which it is Cash.
+
+--4.What is the average tip paid per trip? Compare the average tip with the 25th, 50th and 75th percentiles and comment whether the ‘average tip’ is a representative statistic (of the central tendency) of ‘tip amount paid’. 
+--Hint: You may use percentile_approx(DOUBLE col, p): Returns an approximate pth percentile of a numeric column (including floating point types) in the group.
+select round(avg(Tip_amount),2)
+from taxi_partitioned_orc;
+-- 1.85
+
+select percentile_approx(Tip_amount ,array(0.25,0.50,0.75))
+from taxi_partitioned_orc;
+[0.0,1.35,2.45]
+
+-- With the above date it can be concluded that the average tip amount is 1.85 and median is 1.35. Hence it states that there are some outlier values in the tip amount and the
+--average doesnot represent the whole nature.
+
+--5.Explore the ‘Extra’ (charge) variable - what fraction of total trips have an extra charge is levied?
+select round(avg(Extra),2)
+from taxi_partitioned_orc;
+-- Average amount is 0.32
+
+--Checking total number of trips
+select count(*)
+from taxi_partitioned_orc;
+--Total trips are 1157954
+
+--Checking number of trips where extra charge is levied
+select count(*)
+from taxi_partitioned_orc
+where Extra>0;
+--Number of trips where extra charge is levied are 536681
+
+select round((536681/1157954)*100,2);
+--A total of 46.35% of trips charge with extra charge
+
+--Analysis-2
+--1. What is the correlation between the number of passengers on any given trip, and the tip paid per trip?
+--  Do multiple travellers tip more compared to solo travellers? Hint: Use CORR(Col_1, Col_2)
+select corr(Passenger_count,Tip_amount)
+from taxi_partitioned_orc;
+-- -0.0049
+
+select round(avg(Tip_amount),2)
+from taxi_partitioned_orc
+where Passenger_count=1;
+-- Solo Passengers give an average of 1.86 units of Tip_amount
+
+select round(avg(Tip_amount),2)
+from taxi_partitioned_orc
+where Passenger_count>1;
+-- Multiple travellers give an average of 1.83 untis of Tip_amount
+-- Hence solo passengers tip slightly more compared to multiple pasengers riding together
+
+--Segregate the data into five segments of ‘tip paid’: [0-5), [5-10), [10-15) , [15-20) and >=20. 
+--Calculate the percentage share of each bucket (i.e. the fraction of trips falling in each bucket).
+
+
+select buckets, count(*) as count
+from (
+select Tip_amount,
+    case 
+        when Tip_amount>=0.0 and Tip_amount<5.0 then 'B1'
+        when Tip_amount>=5.0 and Tip_amount<10.0 then 'B2'
+        when Tip_amount>=10.0 and Tip_amount<15.0 then 'B3'
+        when Tip_amount>=15.0 and Tip_amount<20.0 then 'B4'
+        else 'B5'
+    end as buckets
+from taxi_partitioned_orc) as A
+group by buckets;
+
+ 	buckets	count
+1	B1	    1067588
+2	B2	    65511
+3	B3	    21222
+4	B4	    2591
+5	B5	    1042
+
+-- Percentage of share for each bucket in total count
+--Total count 
+select count(*)
+from taxi_partitioned_orc;
+--1157954
+
+--Percentage
+select buckets,round((count(*)/1157954)*100,2) as Percent
+from (
+select Tip_amount,
+    case 
+        when Tip_amount>=0.0 and Tip_amount<5.0 then 'B1'
+        when Tip_amount>=5.0 and Tip_amount<10.0 then 'B2'
+        when Tip_amount>=10.0 and Tip_amount<15.0 then 'B3'
+        when Tip_amount>=15.0 and Tip_amount<20.0 then 'B4'
+        else 'B5'
+    end as buckets
+from taxi_partitioned_orc) as A
+group by buckets;
+
+ 	buckets	Percent
+1	B1	    92.2
+2	B2	    5.66
+3	B3	    1.83
+4	B4	    0.22
+5	B5	    0.09
+-- The major share is occupied by rides with tip amounts between 0 and 5.0 .
+
+--3.Which month has a greater average ‘speed’ - November or December? 
+--Note that the variable ‘speed’ will have to be derived from other metrics. Hint: You have columns for distance and time.
+select mnth, round(avg(Trip_distance/((unix_timestamp(tpep_dropoff_datetime)-unix_timestamp(tpep_pickup_datetime))/3600)),2) as speed
+from taxi_partitioned_orc
+group by mnth;
+
+ 	mnth	speed
+1	11	    11.00
+2	12	    11.09
+--Hence we can conclude that December has higher avg speed compared to November
+
+--4.Analyse the average speed of the most happening days of the year, 
+--i.e. 31st December (New year’s eve) and 25th December (Christmas) and compare it with the overall average. 
+
+--25th Dec
+select round(avg(Trip_distance/((unix_timestamp(tpep_dropoff_datetime)-unix_timestamp(tpep_pickup_datetime))/3600)),2) as speed
+from taxi_partitioned_orc
+where day(tpep_pickup_datetime) =25 and month(tpep_pickup_datetime)=12;
+--Average speed during december 25th is 15.27 miles/hr
+
+--31st Dec
+select round(avg(Trip_distance/((unix_timestamp(tpep_dropoff_datetime)-unix_timestamp(tpep_pickup_datetime))/3600)),2) as speed
+from taxi_partitioned_orc
+where day(tpep_pickup_datetime) =31 and month(tpep_pickup_datetime)=12;
+--Average speed during december 25th is 13.24 miles/hr
+
+--Overall Average
+select round(avg(Trip_distance/((unix_timestamp(tpep_dropoff_datetime)-unix_timestamp(tpep_pickup_datetime))/3600)),2) as speed
+from taxi_partitioned_orc;
+--Average speed during december 25th is 11.05 miles/hr
+--Conclusion: The average speed on Dec 25 is higher with 15.27 miles than on Dec 31st which 13.24 miles and greater than overall average which is 11.05 miles
+
